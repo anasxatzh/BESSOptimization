@@ -7,8 +7,7 @@ from pulp import *
 import matplotlib.pyplot as plt
 
 
-timeLine = 8760 # hours
-
+timeLine, windGenXlsx = 8760, r"gpwind2021gross.xlsx"
 
 class BaseModel(object):
 
@@ -117,7 +116,7 @@ class OptimizeModel(BaseModel):
                    inptArr : list) -> int:
         minVal = inptArr[0]
         for num in inptArr[1:]:
-            if num <= minVal:
+            if num < minVal:
                 minVal = num
         return minVal
 
@@ -165,7 +164,7 @@ class OptimizeModel(BaseModel):
             df.at[i, colName] = rowVal if rowVal is not None else rowValM
 
 
-        inptDf["SoC(MWh)"] = df[colName]
+        inptDf[colName] = df[colName]
 
         return inptDf
 
@@ -173,9 +172,11 @@ class OptimizeModel(BaseModel):
 
     def solveModel(self) -> pd.DataFrame:
 
-        # CREATE AN INSTANCE OF THE BaseModel CLASS
-        baseModel = BaseModel(fileName=r"gpwind2021gross.xlsx")
+        global windGenXlsx
+        baseModel = BaseModel(fileName=windGenXlsx)
 
+        keepSoc = [] # HOLD SOC VALUES
+        
         # IMPORT THE APPROPRIATE DATA FROM THE ImportData CLASS
         importData = ImportData(**vars(baseModel))
         df = importData.windData()
@@ -184,10 +185,8 @@ class OptimizeModel(BaseModel):
         df = df["Wind"].to_frame()
         wind_profile_full = df.iloc[:, 0].tolist()
 
-        keepSoc = []
 
         for day in range(len(wind_profile_full) // len(self.hours)):
-            # wind_profile --> List with the wind generation for every hour of each day
             wind_profile = wind_profile_full[day * len(self.hours) : (day+1) * len(self.hours)] 
 
             # CREATE A pulp MODEL
@@ -226,6 +225,7 @@ class OptimizeModel(BaseModel):
 
             ## DEFINE OBJECTIVE FUNCTION
             # ASSUMING THE SELLING PRICE REMAINS CONSTANT DURING THE HOURLY SIMULATION (300 currency/MWh)
+            # IF NOT CREATE A sellPDf AND PASS THE VALUES TO THE OBJECTIVE FUNCITON FOR EVERY HOUR OF THE YEAR
             model += lpSum((total_output_poi[h] * sellPrice) for h in self.hours) # MAXIMIZE THE REVENUES OF THE HYBRID SYSTEM
 
 
@@ -247,12 +247,12 @@ class OptimizeModel(BaseModel):
                     if h == 0:
                         soc[h] = self.initialSOC
                     else:
-                        soc[h] = soc[h] + soc[h-1]
+                        soc[h] += soc[h-1]
                 else:
                     if h == 0:
                         soc[h] = keepSoc[len(keepSoc) - 1] # GET THE LAST SOC VALUE FOR THE DAY
                     else:
-                        soc[h] = soc[h] + soc[h-1]
+                        soc[h] += soc[h-1]
 
 
                 ## DEFINE THE PEAK HOURS
@@ -262,19 +262,15 @@ class OptimizeModel(BaseModel):
                     if wind_profile[h] > self.firm_block_limit:
                         diff = wind_profile[h] - self.firm_block_limit
                         if diff <= self.max_charge_rate:
-                            if diff <= self.battery_capacity - soc[h]:
-                                chargeDiff = diff
-                            else:
-                                chargeDiff = self.battery_capacity - soc[h]
+                            if diff <= self.battery_capacity - soc[h] : chargeDiff = diff
+                            else : chargeDiff = self.battery_capacity - soc[h]
                         else:
-                            if self.max_charge_rate <= self.battery_capacity - soc[h]:
-                                chargeDiff = self.max_charge_rate
-                            else:
-                                chargeDiff = self.battery_capacity - soc[h]
+                            if self.max_charge_rate <= self.battery_capacity - soc[h] : chargeDiff = self.max_charge_rate
+                            else : chargeDiff = self.battery_capacity - soc[h]
 
                         model += charge[h] == chargeDiff # CHARGE THE DIFFERENCE
                         model += discharge[h] == 0 # CHARGE AND DISCHARGE SHOULD NOT TAKE PLACE AT THE SAME HOUR h
-                        soc[h] = soc[h] + chargeDiff
+                        soc[h] += chargeDiff
                         model += total_output_poi[h] == self.firm_block_limit # THE POI IS THE FIRM BLOCK LIMIT
 
 
@@ -286,13 +282,11 @@ class OptimizeModel(BaseModel):
                         ## CHECK THE AMOUNT OF ENERGY STORED IN THE BESS VIA STATE OF CHARGE
                         if soc[h] >= diff:
 
-                            if diff <= self.max_charge_rate:
-                                dischargeDiff = diff
-                            else:
-                                dischargeDiff = self.max_charge_rate
+                            if diff <= self.max_charge_rate : dischargeDiff = diff
+                            else : dischargeDiff = self.max_charge_rate
 
                             model += discharge[h] == dischargeDiff
-                            soc[h] = soc[h] - dischargeDiff
+                            soc[h] -= dischargeDiff
                             model += total_output_poi[h] == self.firm_block_limit # THE POI IS THE FIRM BLOCK LIMIT
 
                         ## IF THE AMOUNT OF ENERGY STORED IN THE BESS IS NOT SUFFICIENT TO FULFILL THE FIRM BLOCK LIMIT
@@ -310,18 +304,14 @@ class OptimizeModel(BaseModel):
                     if wind_profile[h] > 0:
 
                         if wind_profile[h] <= self.max_charge_rate:
-                            if wind_profile[h] <= self.battery_capacity - soc[h]:
-                                chargeAmount = wind_profile[h]
-                            else:
-                                chargeAmount = self.battery_capacity - soc[h]
+                            if wind_profile[h] <= self.battery_capacity - soc[h] : chargeAmount = wind_profile[h]
+                            else : chargeAmount = self.battery_capacity - soc[h]
                         else:
-                            if self.max_charge_rate <= self.battery_capacity - soc[h]:
-                                chargeAmount = self.max_charge_rate
-                            else:
-                                chargeAmount = self.battery_capacity - soc[h]
+                            if self.max_charge_rate <= self.battery_capacity - soc[h] : chargeAmount = self.max_charge_rate
+                            else : chargeAmount = self.battery_capacity - soc[h]
 
                         model += charge[h] == chargeAmount # CHARGE THE BATTERY WITH THE AMOUNT OF ENERGY GENERATED FROM WIND
-                        soc[h] = soc[h] + chargeAmount
+                        soc[h] += chargeAmount
 
                     else:
                         model += charge[h] == 0 # WE SHOULD NOT CHARGE THE BESS
@@ -382,10 +372,7 @@ class OptimizeModel(BaseModel):
 
 if __name__ == "__main__":
 
-    # CREATE AN INSTANCE OF THE BaseModel CLASS
     baseModel = BaseModel(fileName=r"gpwind2021gross.xlsx")
-
-    # INSTANTIATE THE OptimizeModel CLASS
     opt = OptimizeModel(**vars(baseModel))
 
     ansDf = opt.solveModel()
